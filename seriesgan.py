@@ -291,58 +291,67 @@ def seriesgan(ori_data, parameters, num_samples):
     sess = tf.compat.v1.Session()
     sess.run(tf.compat.v1.global_variables_initializer())
 
+    start_step = 0
+    run_pretraining = True
     latest_ckpt = tf.train.latest_checkpoint(checkpoint_dir)
     if latest_ckpt:
         saver.restore(sess, latest_ckpt)
         print(f'[Checkpoint] Restored from {latest_ckpt}')
+        run_pretraining = False
+        if '-' in latest_ckpt:
+            try:
+                start_step = int(latest_ckpt.split('-')[-1])
+            except ValueError:
+                start_step = 0
 
     final_generated = []
     global_summing = 5
 
-    # ============== Phase 1: Loss Function AE (0.5x iterations) ==============
-    p1 = int(iterations * 0.5)
-    print(f'Phase 1: Loss Function AE Training ({p1} iters)')
-    for itt in range(p1):
-        for _ in range(2):
+    if run_pretraining:
+        # ============== Phase 1: Loss Function AE (0.5x iterations) ==============
+        p1 = int(iterations * 0.5)
+        print(f'Phase 1: Loss Function AE Training ({p1} iters)')
+        for itt in range(p1):
+            for _ in range(2):
+                X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
+                _, step_loss = sess.run([E_solver_temporal, E_loss_temporal], feed_dict={X: X_mb, T: T_mb})
+            if itt % 500 == 0 or itt == p1 - 1:
+                print(f'  step: {itt*2}/{iterations}, AE_loss: {np.round(step_loss, 4)}')
+        print('Phase 1 Complete')
+
+        # ============== Phase 2: Embedding Network (0.5x iterations) ==============
+        p2 = int(iterations * 0.5)
+        print(f'Phase 2: Embedding Network Training ({p2} iters)')
+        step_d_ae = 0.0
+        for itt in range(p2):
+            for _ in range(2):
+                X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
+                _, step_loss = sess.run([E0_solver, E_loss0], feed_dict={X: X_mb, T: T_mb})
+            chk = sess.run(D_ae_loss, feed_dict={X: X_mb, T: T_mb})
+            if chk > 0.15:
+                _, step_d_ae = sess.run([D_ae_solver, D_ae_loss], feed_dict={X: X_mb, T: T_mb})
+            if itt % 500 == 0 or itt == p2 - 1:
+                print(f'  step: {itt*2}/{iterations}, AE_loss: {np.round(step_loss, 4)}, AE_D: {np.round(step_d_ae, 4)}')
+        print('Phase 2 Complete')
+
+        # ============== Phase 3: Supervised Only (1x iterations) ==============
+        print(f'Phase 3: Supervised Loss Only ({iterations} iters)')
+        for itt in range(iterations):
             X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-            _, step_loss = sess.run([E_solver_temporal, E_loss_temporal], feed_dict={X: X_mb, T: T_mb})
-        if itt % 500 == 0 or itt == p1 - 1:
-            print(f'  step: {itt*2}/{iterations}, AE_loss: {np.round(step_loss, 4)}')
-    print('Phase 1 Complete')
+            Z_mb = random_generator(batch_size, z_dim, T_mb, max_seq_len)
+            _, step_s = sess.run([GS_solver, G_loss_S], feed_dict={Z: Z_mb, X: X_mb, T: T_mb})
+            if itt % 1000 == 0 or itt == iterations - 1:
+                print(f'  step: {itt}/{iterations}, S_loss: {np.round(step_s, 4)}')
+        print('Phase 3 Complete')
 
-    # ============== Phase 2: Embedding Network (0.5x iterations) ==============
-    p2 = int(iterations * 0.5)
-    print(f'Phase 2: Embedding Network Training ({p2} iters)')
-    step_d_ae = 0.0
-    for itt in range(p2):
-        for _ in range(2):
-            X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-            _, step_loss = sess.run([E0_solver, E_loss0], feed_dict={X: X_mb, T: T_mb})
-        chk = sess.run(D_ae_loss, feed_dict={X: X_mb, T: T_mb})
-        if chk > 0.15:
-            _, step_d_ae = sess.run([D_ae_solver, D_ae_loss], feed_dict={X: X_mb, T: T_mb})
-        if itt % 500 == 0 or itt == p2 - 1:
-            print(f'  step: {itt*2}/{iterations}, AE_loss: {np.round(step_loss, 4)}, AE_D: {np.round(step_d_ae, 4)}')
-    print('Phase 2 Complete')
-
-    # ============== Phase 3: Supervised Only (1x iterations) ==============
-    print(f'Phase 3: Supervised Loss Only ({iterations} iters)')
-    for itt in range(iterations):
-        X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-        Z_mb = random_generator(batch_size, z_dim, T_mb, max_seq_len)
-        _, step_s = sess.run([GS_solver, G_loss_S], feed_dict={Z: Z_mb, X: X_mb, T: T_mb})
-        if itt % 1000 == 0 or itt == iterations - 1:
-            print(f'  step: {itt}/{iterations}, S_loss: {np.round(step_s, 4)}')
-    print('Phase 3 Complete')
-
-    save_path = saver.save(sess, ckpt_prefix, global_step=0)
-    print(f'[Checkpoint] Pre-training saved -> {save_path}')
-    push_checkpoints(checkpoint_dir, drive_folder_id, gdrive_secret)
+        save_path = saver.save(sess, ckpt_prefix, global_step=0)
+        print(f'[Checkpoint] Pre-training saved -> {save_path}')
+        push_checkpoints(checkpoint_dir, drive_folder_id, gdrive_secret)
 
     # ============== Phase 4: Joint Training (1x iterations) ==============
-    print(f'Phase 4: Joint Training ({iterations} iters)')
+    print(f'Phase 4: Joint Training ({iterations} iters, starting from {start_step})')
     step_d, step_d_ae = 0.0, 0.0
-    for itt in range(iterations):
+    for itt in range(start_step, iterations):
         for _ in range(2):
             X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
             Z_mb = random_generator(batch_size, z_dim, T_mb, max_seq_len)
