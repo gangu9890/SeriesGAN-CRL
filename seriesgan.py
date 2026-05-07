@@ -232,8 +232,42 @@ def seriesgan(ori_data, parameters, num_samples):
     E_loss_U_e_second_emb = tf.reduce_mean(tf.math.squared_difference(tf.ones_like(Y_ae_fake_e_second), Y_ae_fake_e_second))
     E_loss_T0 = E_loss_T00 + lambda_c * E_loss_U_emb
     E_loss_T0_second = E_loss_T00 + 0.1 * (lambda_c * E_loss_U_emb + lambda_c * beta * 0.1 * (E_loss_U_e_emb + gamma * E_loss_U_e_second_emb))
-    E_loss0 = tf.sqrt(E_loss_T0)
-    E_loss  = tf.sqrt(E_loss_T0_second) + 0.01 * G_loss_S
+
+    # ================================================================
+    # Contrastive Representation Learning Loss (NT-Xent)
+    # ================================================================
+    # Create two augmented views of the input data
+    X_aug1 = X + tf.random.normal(tf.shape(X), mean=0.0, stddev=0.05)
+    X_aug2 = X * tf.random.uniform(tf.shape(X), minval=0.9, maxval=1.1)
+
+    # Encode both views into the latent space
+    H1 = f_embedder(X_aug1)
+    H2 = f_embedder(X_aug2)
+
+    # Global average pooling over time
+    z1 = tf.reduce_mean(H1, axis=1)
+    z2 = tf.reduce_mean(H2, axis=1)
+
+    # L2 Normalize
+    z1 = tf.math.l2_normalize(z1, axis=1)
+    z2 = tf.math.l2_normalize(z2, axis=1)
+
+    # Compute similarity matrix scaled by temperature
+    tau = 0.1
+    sim_matrix = tf.matmul(z1, z2, transpose_b=True) / tau
+
+    # The positive pairs are on the diagonal
+    labels = tf.range(tf.shape(z1)[0])
+
+    # Cross entropy loss
+    loss_a = tf.compat.v1.losses.sparse_softmax_cross_entropy(labels, sim_matrix)
+    loss_b = tf.compat.v1.losses.sparse_softmax_cross_entropy(labels, tf.transpose(sim_matrix))
+    contrastive_loss = (loss_a + loss_b) / 2.0
+
+    # Add contrastive loss to Embedder
+    lambda_contrastive = 0.1
+    E_loss0 = tf.sqrt(E_loss_T0) + lambda_contrastive * contrastive_loss
+    E_loss  = tf.sqrt(E_loss_T0_second) + 0.01 * G_loss_S + lambda_contrastive * contrastive_loss
 
     E_loss_temporal = tf.reduce_mean(tf.math.squared_difference(X, X_t))
 
